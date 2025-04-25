@@ -3,9 +3,13 @@ const admin = require('firebase-admin');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+const admin = require("firebase-admin");
+// 從環境變數中讀取 JSON 格式的金鑰
+const serviceAccount = JSON.parse(process.env.FIREBASE_KEY);
+
 admin.initializeApp({
-  credential: admin.credential.cert(require('./firebase-key.json')),
-  databaseURL: 'https://YOUR_PROJECT_ID.firebaseio.com'
+  credential: admin.credential.cert(serviceAccount),
+  databaseURL: "https://fdwaterlevel-default-rtdb.asia-southeast1.firebasedatabase.app"
 });
 
 const db = admin.database();
