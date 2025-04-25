@@ -3,7 +3,6 @@ const admin = require('firebase-admin');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-const admin = require("firebase-admin");
 // 從環境變數中讀取 JSON 格式的金鑰
 const serviceAccount = JSON.parse(process.env.FIREBASE_KEY);
 
