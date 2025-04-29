@@ -4,7 +4,6 @@ const cron = require('node-cron');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// 讀取金鑰
 const serviceAccount = JSON.parse(process.env.FIREBASE_KEY);
 
 admin.initializeApp({
@@ -13,27 +12,8 @@ admin.initializeApp({
 });
 
 const db = admin.database();
+
 app.use(express.json());
-
-// 轉換 timestamp 成 YYYY-MM-DD 字串
-function getDateString(timestamp) {
-  const date = new Date(timestamp);
-  const year = date.getFullYear();
-  const month = (`0${date.getMonth() + 1}`).slice(-2);
-  const day = (`0${date.getDate()}`).slice(-2);
-  return `${year}-${month}-${day}`;
-}
-
-// 取得 N 天前的日期字串
-function getDateNDaysAgo(n) {
-  const date = new Date(Date.now() - n * 24 * 60 * 60 * 1000);
-  const year = date.getFullYear();
-  const month = (`0${date.getMonth() + 1}`).slice(-2);
-  const day = (`0${date.getDate()}`).slice(-2);
-  return `${year}-${month}-${day}`;
-}
-
-// ------------------ API ------------------
 
 // 上傳資料
 app.post('/upload', async (req, res) => {
@@ -43,111 +23,83 @@ app.post('/upload', async (req, res) => {
   }
 
   const timestamp = Date.now();
-  const dateString = getDateString(timestamp);
+  const dateString = new Date(timestamp).toISOString().split('T')[0];
   const path = `waterHistory/${deviceId}/${dateString}/${timestamp}`;
-  
-  try {
-    await db.ref(path).set({ level, timestamp });
-    res.send({ success: true });
-  } catch (error) {
-    console.error('Error uploading data:', error);
-    res.status(500).send('Internal server error');
-  }
+  await db.ref(path).set({ level });  // ✅ 移除 timestamp 欄位
+
+  res.send({ success: true });
 });
 
 // 取得最新資料
 app.get('/latest/:deviceId', async (req, res) => {
   const deviceId = req.params.deviceId;
-  const ref = db.ref(`waterHistory/${deviceId}`);
+  const deviceRef = db.ref(`waterHistory/${deviceId}`);
+  const dateSnapshot = await deviceRef.orderByKey().limitToLast(1).once('value');
 
-  try {
-    const snapshot = await ref.once('value');
-    let latestTimestamp = 0;
-    let latestData = null;
-
-    snapshot.forEach((dateSnapshot) => {
-      dateSnapshot.forEach((timeSnapshot) => {
-        const data = timeSnapshot.val();
-        if (data.timestamp > latestTimestamp) {
-          latestTimestamp = data.timestamp;
-          latestData = data;
-        }
-      });
+  let latestData = {};
+  dateSnapshot.forEach((dateChild) => {
+    dateChild.forEach((timestampChild) => {
+      latestData = {
+        timestamp: Number(timestampChild.key),
+        ...timestampChild.val()
+      };
     });
+  });
 
-    res.send(latestData || {});
-  } catch (error) {
-    console.error('Error fetching latest data:', error);
-    res.status(500).send('Internal server error');
-  }
+  res.send(latestData);
 });
 
-// 取得最近 7 天歷史資料
+// 取得歷史資料（7天內）
 app.get('/history/:deviceId', async (req, res) => {
   const deviceId = req.params.deviceId;
   const now = Date.now();
   const sevenDaysAgo = now - 7 * 24 * 60 * 60 * 1000;
-  const ref = db.ref(`waterHistory/${deviceId}`);
 
-  try {
-    const snapshot = await ref.once('value');
-    let historyData = {};
+  const deviceRef = db.ref(`waterHistory/${deviceId}`);
+  const dateSnapshot = await deviceRef.once('value');
 
-    snapshot.forEach((dateSnapshot) => {
-      const dateKey = dateSnapshot.key;
-      const dateTimestamp = new Date(dateKey).getTime();
+  const result = [];
 
-      if (dateTimestamp >= sevenDaysAgo) {
-        dateSnapshot.forEach((timeSnapshot) => {
-          const data = timeSnapshot.val();
-          if (data.timestamp >= sevenDaysAgo) {
-            historyData[timeSnapshot.key] = data;
-          }
+  dateSnapshot.forEach((dateChild) => {
+    dateChild.forEach((timestampChild) => {
+      const timestamp = Number(timestampChild.key);
+      if (timestamp >= sevenDaysAgo) {
+        result.push({
+          timestamp,
+          ...timestampChild.val()
         });
       }
     });
+  });
 
-    res.send(historyData);
-  } catch (error) {
-    console.error('Error fetching history data:', error);
-    res.status(500).send('Internal server error');
-  }
+  res.send(result);
 });
 
-// ------------------ 定時清理 ------------------
-
-// 每天凌晨 00:00 刪除 7 天前的舊資料
+// 定時清除 7 天前資料
 cron.schedule('0 0 * * *', async () => {
-  console.log('Running daily cleanup task...');
-  const cutoffDate = getDateNDaysAgo(7);
+  console.log('Running daily cleanup...');
+  const now = Date.now();
+  const sevenDaysAgo = now - 7 * 24 * 60 * 60 * 1000;
 
-  try {
-    const snapshot = await db.ref('waterHistory').once('value');
-    let deletedCount = 0;
-    const deletePromises = [];
+  const ref = db.ref('waterHistory');
+  const snapshot = await ref.once('value');
 
-    snapshot.forEach((deviceSnapshot) => {
-      const deviceId = deviceSnapshot.key;
+  let deletedCount = 0;
 
-      deviceSnapshot.forEach((dateSnapshot) => {
-        const dateKey = dateSnapshot.key;
-        if (dateKey < cutoffDate) {
-          const ref = db.ref(`waterHistory/${deviceId}/${dateKey}`);
-          deletePromises.push(ref.remove());
-          deletedCount++;
-        }
-      });
+  snapshot.forEach((deviceSnapshot) => {
+    deviceSnapshot.forEach((dateSnapshot) => {
+      const date = dateSnapshot.key;
+      const dateTimestamp = new Date(date).getTime();
+      if (dateTimestamp < sevenDaysAgo) {
+        dateSnapshot.ref.remove();
+        deletedCount++;
+      }
     });
+  });
 
-    await Promise.all(deletePromises);
-    console.log(`Deleted ${deletedCount} outdated date entries before ${cutoffDate}.`);
-  } catch (error) {
-    console.error('Error during cleanup:', error);
-  }
+  console.log(`Deleted ${deletedCount} outdated date folders.`);
 });
-
-// ------------------ 啟動服務 ------------------
 
 app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
