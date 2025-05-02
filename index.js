@@ -15,7 +15,10 @@ admin.initializeApp({
 const db = admin.database();
 app.use(express.json());
 
-// 上傳資料（使用台灣時間分日期）
+// 暫存 Buffer（所有裝置共用）
+const bufferList = [];
+
+// 上傳資料
 app.post('/upload', async (req, res) => {
   const { deviceId, level } = req.body;
   if (!deviceId || typeof level !== 'number') {
@@ -23,19 +26,54 @@ app.post('/upload', async (req, res) => {
   }
 
   const timestamp = Date.now();
-  const tzOffset = 8 * 60 * 60 * 1000; // 台灣為 UTC+8，毫秒
-  const localDate = new Date(timestamp + tzOffset);
-  const dateString = localDate.toISOString().split('T')[0]; // e.g., "2025-04-30"
+  bufferList.push({ deviceId, timestamp, level });
 
-  const path = `waterHistory/${deviceId}/${dateString}/${timestamp}`;
-  await db.ref(path).set({ level });
+  // 若總筆數 >= 100 筆，寫入 Firebase
+  if (bufferList.length >= 100) {
+    await flushBufferList();
+  }
 
   res.send({ success: true });
 });
 
-// 取得最新資料
+// flush buffer 至 Firebase
+async function flushBufferList() {
+  if (bufferList.length === 0) return;
+
+  const updates = {};
+  for (const { deviceId, timestamp, level } of bufferList) {
+    const tzOffset = 8 * 60 * 60 * 1000;
+    const localDate = new Date(timestamp + tzOffset);
+    const dateString = localDate.toISOString().split('T')[0];
+    const path = `waterHistory/${deviceId}/${dateString}/${timestamp}`;
+    updates[path] = { level };
+  }
+
+  await db.ref().update(updates);
+  bufferList.length = 0;
+}
+
+// 每 10 分鐘 flush buffer
+setInterval(async () => {
+  console.log('Timer triggered buffer flush...');
+  await flushBufferList();
+}, 10 * 60 * 1000);
+
+// 取得最新資料（含 buffer）
 app.get('/latest/:deviceId', async (req, res) => {
   const deviceId = req.params.deviceId;
+
+  // 從 buffer 取出該裝置資料
+  const bufferedData = bufferList
+    .filter(d => d.deviceId === deviceId)
+    .sort((a, b) => b.timestamp - a.timestamp);
+
+  if (bufferedData.length > 0) {
+    const { timestamp, level } = bufferedData[0];
+    return res.send({ timestamp, level });
+  }
+
+  // 若 buffer 無資料則讀取 Firebase
   const deviceRef = db.ref(`waterHistory/${deviceId}`);
   const dateSnapshot = await deviceRef.orderByKey().limitToLast(1).once('value');
 
@@ -52,7 +90,7 @@ app.get('/latest/:deviceId', async (req, res) => {
   res.send(latestData);
 });
 
-// 取得過去 7 天內的歷史資料（比對 UTC timestamp）
+// 取得過去 7 天歷史資料（含 buffer）
 app.get('/history/:deviceId', async (req, res) => {
   const deviceId = req.params.deviceId;
   const now = Date.now();
@@ -63,6 +101,7 @@ app.get('/history/:deviceId', async (req, res) => {
 
   const result = [];
 
+  // 先取 Firebase
   dateSnapshot.forEach((dateChild) => {
     dateChild.forEach((timestampChild) => {
       const timestamp = Number(timestampChild.key);
@@ -75,10 +114,19 @@ app.get('/history/:deviceId', async (req, res) => {
     });
   });
 
+  // 加入 buffer 資料
+  bufferList
+    .filter(d => d.deviceId === deviceId && d.timestamp >= sevenDaysAgo)
+    .forEach(d => {
+      result.push({ timestamp: d.timestamp, level: d.level });
+    });
+
+  // 按時間排序
+  result.sort((a, b) => a.timestamp - b.timestamp);
   res.send(result);
 });
 
-// 定時清除 7 天前的資料（以台灣日期為依據）
+// 定時清除過期資料（每日午夜）
 cron.schedule('0 0 * * *', async () => {
   console.log('Running daily cleanup...');
   const now = Date.now();
@@ -92,7 +140,7 @@ cron.schedule('0 0 * * *', async () => {
   snapshot.forEach((deviceSnapshot) => {
     deviceSnapshot.forEach((dateSnapshot) => {
       const date = dateSnapshot.key;
-      const dateTimestamp = new Date(date).getTime() + 8 * 60 * 60 * 1000; // ✅ 台灣時間偏移
+      const dateTimestamp = new Date(date).getTime() + 8 * 60 * 60 * 1000;
       if (dateTimestamp < sevenDaysAgo) {
         dateSnapshot.ref.remove();
         deletedCount++;
