@@ -55,7 +55,7 @@ async function flushBufferList() {
 
 // 每 10 分鐘 flush buffer
 setInterval(async () => {
-  console.log('Timer triggered buffer flush...');
+  //console.log('Timer triggered buffer flush...');
   await flushBufferList();
 }, 10 * 60 * 1000);
 
