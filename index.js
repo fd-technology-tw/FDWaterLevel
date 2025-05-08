@@ -36,17 +36,31 @@ app.post('/upload', async (req, res) => {
   res.send({ success: true });
 });
 
-// flush buffer 至 Firebase
+// flush buffer 至 Firebase（含 latest 儲存）
 async function flushBufferList() {
   if (bufferList.length === 0) return;
 
   const updates = {};
+  const latestMap = new Map(); // 每個 device 最新資料
+
   for (const { deviceId, timestamp, level } of bufferList) {
     const tzOffset = 8 * 60 * 60 * 1000;
     const localDate = new Date(timestamp + tzOffset);
     const dateString = localDate.toISOString().split('T')[0];
     const path = `waterHistory/${deviceId}/${dateString}/${timestamp}`;
     updates[path] = { level };
+
+    // 記錄最新資料
+    const prev = latestMap.get(deviceId);
+    if (!prev || timestamp > prev.timestamp) {
+      latestMap.set(deviceId, { timestamp, level });
+    }
+  }
+
+  // 寫入 waterLatest
+  for (const [deviceId, { timestamp, level }] of latestMap) {
+    const latestPath = `waterLatest/${deviceId}`;
+    updates[latestPath] = { timestamp, level };
   }
 
   await db.ref().update(updates);
@@ -55,7 +69,6 @@ async function flushBufferList() {
 
 // 每 10 分鐘 flush buffer
 setInterval(async () => {
-  //console.log('Timer triggered buffer flush...');
   await flushBufferList();
 }, 10 * 60 * 1000);
 
@@ -63,7 +76,7 @@ setInterval(async () => {
 app.get('/latest/:deviceId', async (req, res) => {
   const deviceId = req.params.deviceId;
 
-  // 從 buffer 取出該裝置資料
+  // 檢查 buffer 內是否已有該裝置資料
   const bufferedData = bufferList
     .filter(d => d.deviceId === deviceId)
     .sort((a, b) => b.timestamp - a.timestamp);
@@ -73,21 +86,11 @@ app.get('/latest/:deviceId', async (req, res) => {
     return res.send({ timestamp, level });
   }
 
-  // 若 buffer 無資料則讀取 Firebase
-  const deviceRef = db.ref(`waterHistory/${deviceId}`);
-  const dateSnapshot = await deviceRef.orderByKey().limitToLast(1).once('value');
+  // 若無則讀取快取節點
+  const snapshot = await db.ref(`waterLatest/${deviceId}`).once('value');
+  if (!snapshot.exists()) return res.send({});
 
-  let latestData = {};
-  dateSnapshot.forEach((dateChild) => {
-    dateChild.forEach((timestampChild) => {
-      latestData = {
-        timestamp: Number(timestampChild.key),
-        ...timestampChild.val()
-      };
-    });
-  });
-
-  res.send(latestData);
+  res.send(snapshot.val());
 });
 
 // 取得過去 7 天歷史資料（含 buffer）
@@ -98,10 +101,9 @@ app.get('/history/:deviceId', async (req, res) => {
 
   const deviceRef = db.ref(`waterHistory/${deviceId}`);
   const dateSnapshot = await deviceRef.once('value');
-
   const result = [];
 
-  // 先取 Firebase
+  // Firebase 資料
   dateSnapshot.forEach((dateChild) => {
     dateChild.forEach((timestampChild) => {
       const timestamp = Number(timestampChild.key);
@@ -121,7 +123,7 @@ app.get('/history/:deviceId', async (req, res) => {
       result.push({ timestamp: d.timestamp, level: d.level });
     });
 
-  // 按時間排序
+  // 排序輸出
   result.sort((a, b) => a.timestamp - b.timestamp);
   res.send(result);
 });
@@ -134,7 +136,6 @@ cron.schedule('0 0 * * *', async () => {
 
   const ref = db.ref('waterHistory');
   const snapshot = await ref.once('value');
-
   let deletedCount = 0;
 
   snapshot.forEach((deviceSnapshot) => {
