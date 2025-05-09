@@ -76,7 +76,6 @@ setInterval(async () => {
 app.get('/latest/:deviceId', async (req, res) => {
   const deviceId = req.params.deviceId;
 
-  // 檢查 buffer 內是否已有該裝置資料
   const bufferedData = bufferList
     .filter(d => d.deviceId === deviceId)
     .sort((a, b) => b.timestamp - a.timestamp);
@@ -86,7 +85,6 @@ app.get('/latest/:deviceId', async (req, res) => {
     return res.send({ timestamp, level });
   }
 
-  // 若無則讀取快取節點
   const snapshot = await db.ref(`waterLatest/${deviceId}`).once('value');
   if (!snapshot.exists()) return res.send({});
 
@@ -123,31 +121,33 @@ app.get('/history/:deviceId', async (req, res) => {
       result.push({ timestamp: d.timestamp, level: d.level });
     });
 
-  // 排序輸出
   result.sort((a, b) => a.timestamp - b.timestamp);
   res.send(result);
 });
 
-// 定時清除過期資料（每日午夜）
+// ✅ 每日午夜清除過期資料（已優化：使用 orderByKey 篩選日期）
 cron.schedule('0 0 * * *', async () => {
   console.log('Running daily cleanup...');
-  const now = Date.now();
-  const sevenDaysAgo = now - 7 * 24 * 60 * 60 * 1000;
+  const now = new Date();
+  const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+  const sevenDaysAgoKey = sevenDaysAgo.toISOString().split('T')[0];
 
-  const ref = db.ref('waterHistory');
-  const snapshot = await ref.once('value');
+  const devicesSnapshot = await db.ref('waterHistory').once('value');
   let deletedCount = 0;
 
-  snapshot.forEach((deviceSnapshot) => {
-    deviceSnapshot.forEach((dateSnapshot) => {
-      const date = dateSnapshot.key;
-      const dateTimestamp = new Date(date).getTime() + 8 * 60 * 60 * 1000;
-      if (dateTimestamp < sevenDaysAgo) {
-        dateSnapshot.ref.remove();
-        deletedCount++;
-      }
+  const deviceEntries = Object.entries(devicesSnapshot.val() || {});
+  for (const [deviceId] of deviceEntries) {
+    const deviceRef = db.ref(`waterHistory/${deviceId}`);
+    const outdatedSnapshot = await deviceRef
+      .orderByKey()
+      .endAt(sevenDaysAgoKey)
+      .once('value');
+
+    outdatedSnapshot.forEach(dateSnap => {
+      dateSnap.ref.remove();
+      deletedCount++;
     });
-  });
+  }
 
   console.log(`Deleted ${deletedCount} outdated date folders.`);
 });
