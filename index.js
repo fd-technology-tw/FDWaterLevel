@@ -91,11 +91,11 @@ app.get('/latest/:deviceId', async (req, res) => {
   res.send(snapshot.val());
 });
 
-// 取得過去 7 天歷史資料（含 buffer）
+// 取得過去 3 天歷史資料（含 buffer）
 app.get('/history/:deviceId', async (req, res) => {
   const deviceId = req.params.deviceId;
   const now = Date.now();
-  const sevenDaysAgo = now - 7 * 24 * 60 * 60 * 1000;
+  const threeDaysAgo = now - 3 * 24 * 60 * 60 * 1000;
 
   const deviceRef = db.ref(`waterHistory/${deviceId}`);
   const dateSnapshot = await deviceRef.once('value');
@@ -105,7 +105,7 @@ app.get('/history/:deviceId', async (req, res) => {
   dateSnapshot.forEach((dateChild) => {
     dateChild.forEach((timestampChild) => {
       const timestamp = Number(timestampChild.key);
-      if (timestamp >= sevenDaysAgo) {
+      if (timestamp >= threeDaysAgo) {
         result.push({
           timestamp,
           ...timestampChild.val()
@@ -116,7 +116,7 @@ app.get('/history/:deviceId', async (req, res) => {
 
   // 加入 buffer 資料
   bufferList
-    .filter(d => d.deviceId === deviceId && d.timestamp >= sevenDaysAgo)
+    .filter(d => d.deviceId === deviceId && d.timestamp >= threeDaysAgo)
     .forEach(d => {
       result.push({ timestamp: d.timestamp, level: d.level });
     });
@@ -125,12 +125,12 @@ app.get('/history/:deviceId', async (req, res) => {
   res.send(result);
 });
 
-// ✅ 每日午夜清除過期資料（已優化：使用 orderByKey 篩選日期）
+// 每日午夜清除 3 天前資料
 cron.schedule('0 0 * * *', async () => {
   console.log('Running daily cleanup...');
   const now = new Date();
-  const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-  const sevenDaysAgoKey = sevenDaysAgo.toISOString().split('T')[0];
+  const threeDaysAgo = new Date(now.getTime() - 3 * 24 * 60 * 60 * 1000);
+  const threeDaysAgoKey = threeDaysAgo.toISOString().split('T')[0];
 
   const devicesSnapshot = await db.ref('waterHistory').once('value');
   let deletedCount = 0;
@@ -140,7 +140,7 @@ cron.schedule('0 0 * * *', async () => {
     const deviceRef = db.ref(`waterHistory/${deviceId}`);
     const outdatedSnapshot = await deviceRef
       .orderByKey()
-      .endAt(sevenDaysAgoKey)
+      .endAt(threeDaysAgoKey)
       .once('value');
 
     outdatedSnapshot.forEach(dateSnap => {
