@@ -91,37 +91,46 @@ app.get('/latest/:deviceId', async (req, res) => {
   res.send(snapshot.val());
 });
 
-// 取得過去 3 天歷史資料（含 buffer）
+// ✅ 優化過的：取得過去 3 天歷史資料（含 buffer）
 app.get('/history/:deviceId', async (req, res) => {
   const deviceId = req.params.deviceId;
   const now = Date.now();
   const threeDaysAgo = now - 3 * 24 * 60 * 60 * 1000;
 
-  const deviceRef = db.ref(`waterHistory/${deviceId}`);
-  const dateSnapshot = await deviceRef.once('value');
+  // 產生最近 3 天的日期字串
+  const days = [0, 1, 2].map(offset => {
+    const date = new Date(now - offset * 24 * 60 * 60 * 1000);
+    return date.toISOString().split('T')[0];
+  });
+
   const result = [];
 
-  // Firebase 資料
-  dateSnapshot.forEach((dateChild) => {
-    dateChild.forEach((timestampChild) => {
-      const timestamp = Number(timestampChild.key);
+  // 分日期查詢歷史資料
+  for (const dateKey of days) {
+    const ref = db.ref(`waterHistory/${deviceId}/${dateKey}`);
+    const snapshot = await ref.once('value');
+
+    snapshot.forEach(child => {
+      const timestamp = Number(child.key);
       if (timestamp >= threeDaysAgo) {
         result.push({
           timestamp,
-          ...timestampChild.val()
+          ...child.val()
         });
       }
     });
-  });
+  }
 
-  // 加入 buffer 資料
+  // 加入 buffer 中尚未寫入的資料
   bufferList
     .filter(d => d.deviceId === deviceId && d.timestamp >= threeDaysAgo)
     .forEach(d => {
       result.push({ timestamp: d.timestamp, level: d.level });
     });
 
+  // 時間排序
   result.sort((a, b) => a.timestamp - b.timestamp);
+
   res.send(result);
 });
 
