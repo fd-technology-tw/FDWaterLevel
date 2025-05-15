@@ -48,7 +48,7 @@ async function flushBufferList() {
     const localDate = new Date(timestamp + tzOffset);
     const dateString = localDate.toISOString().split('T')[0];
     const path = `waterHistory/${deviceId}/${dateString}/${timestamp}`;
-    updates[path] = { level };
+    updates[path] = { l: level }; // 🔁 level → l
 
     // 記錄最新資料
     const prev = latestMap.get(deviceId);
@@ -60,7 +60,7 @@ async function flushBufferList() {
   // 寫入 waterLatest
   for (const [deviceId, { timestamp, level }] of latestMap) {
     const latestPath = `waterLatest/${deviceId}`;
-    updates[latestPath] = { timestamp, level };
+    updates[latestPath] = { t: timestamp, l: level }; // 🔁 timestamp → t, level → l
   }
 
   await db.ref().update(updates);
@@ -88,7 +88,11 @@ app.get('/latest/:deviceId', async (req, res) => {
   const snapshot = await db.ref(`waterLatest/${deviceId}`).once('value');
   if (!snapshot.exists()) return res.send({});
 
-  res.send(snapshot.val());
+  const val = snapshot.val();
+  res.send({
+    timestamp: val.t, // 🔁 t → timestamp
+    level: val.l      // 🔁 l → level
+  });
 });
 
 // ✅ 優化過的：取得過去 3 天歷史資料（含 buffer）
@@ -115,7 +119,7 @@ app.get('/history/:deviceId', async (req, res) => {
       if (timestamp >= threeDaysAgo) {
         result.push({
           timestamp,
-          ...child.val()
+          level: child.val().l // 🔁 l → level
         });
       }
     });
