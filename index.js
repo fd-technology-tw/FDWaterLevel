@@ -28,7 +28,6 @@ app.post('/upload', async (req, res) => {
   const timestamp = Date.now();
   bufferList.push({ deviceId, timestamp, level });
 
-  // 若總筆數 >= 100 筆，寫入 Firebase
   if (bufferList.length >= 100) {
     await flushBufferList();
   }
@@ -36,31 +35,43 @@ app.post('/upload', async (req, res) => {
   res.send({ success: true });
 });
 
-// flush buffer 至 Firebase（含 latest 儲存）
+// 修改版：flush buffer 至 Firebase（使用 pair 陣列）
 async function flushBufferList() {
   if (bufferList.length === 0) return;
 
-  const updates = {};
-  const latestMap = new Map(); // 每個 device 最新資料
+  const historyMap = new Map(); // key: deviceId|date, value: [[timestamp, level], ...]
+  const latestMap = new Map();
 
   for (const { deviceId, timestamp, level } of bufferList) {
     const tzOffset = 8 * 60 * 60 * 1000;
-    const localDate = new Date(timestamp + tzOffset);
-    const dateString = localDate.toISOString().split('T')[0];
-    const path = `waterHistory/${deviceId}/${dateString}/${timestamp}`;
-    updates[path] = { l: level }; // 🔁 level → l
+    const localDate = new Date(timestamp + tzOffset).toISOString().split('T')[0];
+    const key = `${deviceId}|${localDate}`;
 
-    // 記錄最新資料
+    if (!historyMap.has(key)) {
+      historyMap.set(key, []);
+    }
+    historyMap.get(key).push([timestamp, level]);
+
     const prev = latestMap.get(deviceId);
     if (!prev || timestamp > prev.timestamp) {
       latestMap.set(deviceId, { timestamp, level });
     }
   }
 
+  // 寫入 waterHistory（pair 陣列 append）
+  for (const [key, dataPairs] of historyMap.entries()) {
+    const [deviceId, dateStr] = key.split('|');
+    const ref = db.ref(`waterHistory/${deviceId}/${dateStr}`);
+
+    await ref.transaction(current => {
+      return (current || []).concat(dataPairs);
+    });
+  }
+
   // 寫入 waterLatest
+  const updates = {};
   for (const [deviceId, { timestamp, level }] of latestMap) {
-    const latestPath = `waterLatest/${deviceId}`;
-    updates[latestPath] = { t: timestamp, l: level }; // 🔁 timestamp → t, level → l
+    updates[`waterLatest/${deviceId}`] = { t: timestamp, l: level };
   }
 
   await db.ref().update(updates);
@@ -90,18 +101,17 @@ app.get('/latest/:deviceId', async (req, res) => {
 
   const val = snapshot.val();
   res.send({
-    timestamp: val.t, // 🔁 t → timestamp
-    level: val.l      // 🔁 l → level
+    timestamp: val.t,
+    level: val.l
   });
 });
 
-// ✅ 優化過的：取得過去 3 天歷史資料（含 buffer）
+// 修改版：取得過去 3 天歷史資料（支援 pair 陣列 + buffer）
 app.get('/history/:deviceId', async (req, res) => {
   const deviceId = req.params.deviceId;
   const now = Date.now();
   const threeDaysAgo = now - 3 * 24 * 60 * 60 * 1000;
 
-  // 產生最近 3 天的日期字串
   const days = [0, 1, 2].map(offset => {
     const date = new Date(now - offset * 24 * 60 * 60 * 1000);
     return date.toISOString().split('T')[0];
@@ -109,32 +119,26 @@ app.get('/history/:deviceId', async (req, res) => {
 
   const result = [];
 
-  // 分日期查詢歷史資料
   for (const dateKey of days) {
-    const ref = db.ref(`waterHistory/${deviceId}/${dateKey}`);
-    const snapshot = await ref.once('value');
+    const snapshot = await db.ref(`waterHistory/${deviceId}/${dateKey}`).once('value');
+    const values = snapshot.val();
 
-    snapshot.forEach(child => {
-      const timestamp = Number(child.key);
-      if (timestamp >= threeDaysAgo) {
-        result.push({
-          timestamp,
-          level: child.val().l // 🔁 l → level
-        });
-      }
-    });
+    if (Array.isArray(values)) {
+      values.forEach(([ts, lv]) => {
+        if (ts >= threeDaysAgo) {
+          result.push({ timestamp: ts, level: lv });
+        }
+      });
+    }
   }
 
-  // 加入 buffer 中尚未寫入的資料
   bufferList
     .filter(d => d.deviceId === deviceId && d.timestamp >= threeDaysAgo)
     .forEach(d => {
       result.push({ timestamp: d.timestamp, level: d.level });
     });
 
-  // 時間排序
   result.sort((a, b) => a.timestamp - b.timestamp);
-
   res.send(result);
 });
 
