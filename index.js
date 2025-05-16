@@ -6,6 +6,7 @@ const PORT = process.env.PORT || 3000;
 
 // 初始化 Firebase Admin
 const serviceAccount = JSON.parse(process.env.FIREBASE_KEY);
+
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
   databaseURL: "https://fdwaterlevel-default-rtdb.asia-southeast1.firebasedatabase.app"
@@ -14,7 +15,7 @@ admin.initializeApp({
 const db = admin.database();
 app.use(express.json());
 
-// 暫存 buffer（所有裝置共用）
+// 暫存 Buffer（所有裝置共用）
 const bufferList = [];
 
 // 上傳資料
@@ -27,6 +28,7 @@ app.post('/upload', async (req, res) => {
   const timestamp = Date.now();
   bufferList.push({ deviceId, timestamp, level });
 
+  // 若總筆數 >= 100 筆，寫入 Firebase
   if (bufferList.length >= 100) {
     await flushBufferList();
   }
@@ -34,53 +36,38 @@ app.post('/upload', async (req, res) => {
   res.send({ success: true });
 });
 
-// flush buffer 至 Firebase（使用 update 寫入 pair 陣列）
+// flush buffer 至 Firebase（含 latest 儲存）
 async function flushBufferList() {
   if (bufferList.length === 0) return;
 
-  // 整理資料
-  const historyMap = new Map();  // key: `deviceId|date`, value: [[t, l], ...]
-  const latestMap = new Map();   // key: deviceId, value: { timestamp, level }
+  const updates = {};
+  const latestMap = new Map(); // 每個 device 最新資料
 
   for (const { deviceId, timestamp, level } of bufferList) {
     const tzOffset = 8 * 60 * 60 * 1000;
-    const localDate = new Date(timestamp + tzOffset).toISOString().split('T')[0];
-    const key = `${deviceId}|${localDate}`;
-    const pair = [timestamp, level];
+    const localDate = new Date(timestamp + tzOffset);
+    const dateString = localDate.toISOString().split('T')[0];
+    const path = `waterHistory/${deviceId}/${dateString}/${timestamp}`;
+    updates[path] = { l: level }; // 🔁 level → l
 
-    if (!historyMap.has(key)) {
-      historyMap.set(key, []);
-    }
-    historyMap.get(key).push(pair);
-
-    // 更新 latest
+    // 記錄最新資料
     const prev = latestMap.get(deviceId);
     if (!prev || timestamp > prev.timestamp) {
       latestMap.set(deviceId, { timestamp, level });
     }
   }
 
-  // 先讀現有資料，再用 .update() 寫回
-  const updates = {};
-  for (const [key, newPairs] of historyMap.entries()) {
-    const [deviceId, dateStr] = key.split('|');
-    const refPath = `waterHistory/${deviceId}/${dateStr}`;
-    const snapshot = await db.ref(refPath).once('value');
-    const existing = snapshot.val() || [];
-    const combined = existing.concat(newPairs);
-    combined.sort((a, b) => a[0] - b[0]); // 確保時間排序
-    updates[refPath] = combined;
-  }
-
-  for (const [deviceId, { timestamp, level }] of latestMap.entries()) {
-    updates[`waterLatest/${deviceId}`] = { t: timestamp, l: level };
+  // 寫入 waterLatest
+  for (const [deviceId, { timestamp, level }] of latestMap) {
+    const latestPath = `waterLatest/${deviceId}`;
+    updates[latestPath] = { t: timestamp, l: level }; // 🔁 timestamp → t, level → l
   }
 
   await db.ref().update(updates);
   bufferList.length = 0;
 }
 
-// 每 10 分鐘自動 flush
+// 每 10 分鐘 flush buffer
 setInterval(async () => {
   await flushBufferList();
 }, 10 * 60 * 1000);
@@ -88,27 +75,33 @@ setInterval(async () => {
 // 取得最新資料（含 buffer）
 app.get('/latest/:deviceId', async (req, res) => {
   const deviceId = req.params.deviceId;
-  const buffered = bufferList
+
+  const bufferedData = bufferList
     .filter(d => d.deviceId === deviceId)
     .sort((a, b) => b.timestamp - a.timestamp);
 
-  if (buffered.length > 0) {
-    const { timestamp, level } = buffered[0];
+  if (bufferedData.length > 0) {
+    const { timestamp, level } = bufferedData[0];
     return res.send({ timestamp, level });
   }
 
   const snapshot = await db.ref(`waterLatest/${deviceId}`).once('value');
   if (!snapshot.exists()) return res.send({});
+
   const val = snapshot.val();
-  res.send({ timestamp: val.t, level: val.l });
+  res.send({
+    timestamp: val.t, // 🔁 t → timestamp
+    level: val.l      // 🔁 l → level
+  });
 });
 
-// 取得過去 3 天歷史資料（含 buffer）
+// ✅ 優化過的：取得過去 3 天歷史資料（含 buffer）
 app.get('/history/:deviceId', async (req, res) => {
   const deviceId = req.params.deviceId;
   const now = Date.now();
   const threeDaysAgo = now - 3 * 24 * 60 * 60 * 1000;
 
+  // 產生最近 3 天的日期字串
   const days = [0, 1, 2].map(offset => {
     const date = new Date(now - offset * 24 * 60 * 60 * 1000);
     return date.toISOString().split('T')[0];
@@ -116,26 +109,36 @@ app.get('/history/:deviceId', async (req, res) => {
 
   const result = [];
 
-  for (const dateStr of days) {
-    const ref = db.ref(`waterHistory/${deviceId}/${dateStr}`);
+  // 分日期查詢歷史資料
+  for (const dateKey of days) {
+    const ref = db.ref(`waterHistory/${deviceId}/${dateKey}`);
     const snapshot = await ref.once('value');
-    const arr = snapshot.val() || [];
-    arr.forEach(([timestamp, level]) => {
+
+    snapshot.forEach(child => {
+      const timestamp = Number(child.key);
       if (timestamp >= threeDaysAgo) {
-        result.push({ timestamp, level });
+        result.push({
+          timestamp,
+          level: child.val().l // 🔁 l → level
+        });
       }
     });
   }
 
+  // 加入 buffer 中尚未寫入的資料
   bufferList
     .filter(d => d.deviceId === deviceId && d.timestamp >= threeDaysAgo)
-    .forEach(d => result.push({ timestamp: d.timestamp, level: d.level }));
+    .forEach(d => {
+      result.push({ timestamp: d.timestamp, level: d.level });
+    });
 
+  // 時間排序
   result.sort((a, b) => a.timestamp - b.timestamp);
+
   res.send(result);
 });
 
-// 每日清除過期資料
+// 每日午夜清除 3 天前資料
 cron.schedule('0 0 * * *', async () => {
   console.log('Running daily cleanup...');
   const now = new Date();
@@ -146,13 +149,17 @@ cron.schedule('0 0 * * *', async () => {
   let deletedCount = 0;
 
   const deviceEntries = Object.entries(devicesSnapshot.val() || {});
-  for (const [deviceId, dayMap] of deviceEntries) {
-    for (const dateKey of Object.keys(dayMap)) {
-      if (dateKey < threeDaysAgoKey) {
-        await db.ref(`waterHistory/${deviceId}/${dateKey}`).remove();
-        deletedCount++;
-      }
-    }
+  for (const [deviceId] of deviceEntries) {
+    const deviceRef = db.ref(`waterHistory/${deviceId}`);
+    const outdatedSnapshot = await deviceRef
+      .orderByKey()
+      .endAt(threeDaysAgoKey)
+      .once('value');
+
+    outdatedSnapshot.forEach(dateSnap => {
+      dateSnap.ref.remove();
+      deletedCount++;
+    });
   }
 
   console.log(`Deleted ${deletedCount} outdated date folders.`);
