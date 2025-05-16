@@ -38,7 +38,6 @@ app.post('/upload', async (req, res) => {
 async function flushBufferList() {
   if (bufferList.length === 0) return;
 
-  // 整理資料
   const historyMap = new Map();  // key: `deviceId|date`, value: [[t, l], ...]
   const latestMap = new Map();   // key: deviceId, value: { timestamp, level }
 
@@ -53,32 +52,31 @@ async function flushBufferList() {
     }
     historyMap.get(key).push(pair);
 
-    // 更新 latest
     const prev = latestMap.get(deviceId);
     if (!prev || timestamp > prev.timestamp) {
       latestMap.set(deviceId, { timestamp, level });
     }
   }
 
-  // 先讀現有資料，再用 .update() 寫回
-  const updates = {};
-  for (const [key, newPairs] of historyMap.entries()) {
+  // 逐筆 push 到對應的歷史路徑（增量寫入）
+  for (const [key, pairs] of historyMap.entries()) {
     const [deviceId, dateStr] = key.split('|');
-    const refPath = `waterHistory/${deviceId}/${dateStr}`;
-    const snapshot = await db.ref(refPath).once('value');
-    const existing = snapshot.val() || [];
-    const combined = existing.concat(newPairs);
-    combined.sort((a, b) => a[0] - b[0]); // 確保時間排序
-    updates[refPath] = combined;
+    const ref = db.ref(`waterHistory/${deviceId}/${dateStr}`);
+    for (const pair of pairs) {
+      await ref.push(pair);
+    }
   }
 
+  // 寫入最新資料
+  const updates = {};
   for (const [deviceId, { timestamp, level }] of latestMap.entries()) {
     updates[`waterLatest/${deviceId}`] = { t: timestamp, l: level };
   }
-
   await db.ref().update(updates);
+
   bufferList.length = 0;
 }
+
 
 // 每 10 分鐘自動 flush
 setInterval(async () => {
