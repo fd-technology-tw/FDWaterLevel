@@ -67,10 +67,10 @@ async function flushBufferList() {
   bufferList.length = 0;
 }
 
-// 每 10 分鐘 flush buffer
+// 每 60 分鐘 flush buffer
 setInterval(async () => {
   await flushBufferList();
-}, 10 * 60 * 1000);
+}, 60 * 60 * 1000);
 
 // 取得最新資料（含 buffer）
 app.get('/latest/:deviceId', async (req, res) => {
