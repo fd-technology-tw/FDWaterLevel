@@ -1,7 +1,7 @@
 const express = require('express');
 const admin = require('firebase-admin');
 const cron = require('node-cron');
-const LRU = require('lru-cache');
+const { LRUCache } = require('lru-cache'); // ✅ 使用新版語法
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -17,7 +17,7 @@ const db = admin.database();
 app.use(express.json());
 
 // 記憶體快取 - 最新資料（LRU）
-const latestDataCache = new LRU({
+const latestDataCache = new LRUCache({
   max: 10000, // 最多記住 10000 台裝置
   ttl: 1000 * 60 * 60 * 24 // 每筆資料保留最多 1 天（24 小時）
 });
