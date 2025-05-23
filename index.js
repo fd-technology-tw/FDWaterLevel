@@ -128,6 +128,11 @@ app.get('/history/:deviceId', async (req, res) => {
     .forEach(d => result.push({ timestamp: d.timestamp, level: d.level }));
 
   result.sort((a, b) => a.timestamp - b.timestamp);
+  
+  // ✅ 計算回傳 payload 大小（字串化後的 JSON）
+  const sizeInKB = Buffer.byteLength(JSON.stringify(result), 'utf8') / 1024;
+  console.log(`Response size ≈ ${sizeInKB.toFixed(2)} KB`);
+  
   res.send(result);
 });
 
