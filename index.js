@@ -17,6 +17,11 @@ admin.initializeApp({
 const db = admin.database();
 app.use(express.json());
 
+// 工具：計算 JSON 物件的大小 (KB)
+function calculateSizeInKB(obj) {
+  return Buffer.byteLength(JSON.stringify(obj), 'utf8') / 1024;
+}
+
 // 快取：最新資料（LRU）
 const latestDataCache = new LRUCache({
   max: 10000,
@@ -70,6 +75,9 @@ async function flushBufferList() {
     latestDataCache.set(deviceId, { timestamp, level });
   }
 
+  const sizeInKB = calculateSizeInKB(updates);
+  console.log(`[FIREBASE WRITE] batched update → ${sizeInKB.toFixed(2)} KB`);
+
   await db.ref().update(updates);
   bufferList.length = 0;
 }
@@ -93,8 +101,11 @@ app.get('/latest/:deviceId', async (req, res) => {
 
   const val = snapshot.val();
   const latest = { timestamp: val.t, level: val.l };
-  latestDataCache.set(deviceId, latest);
 
+  const sizeInKB = calculateSizeInKB(val);
+  console.log(`[FIREBASE READ] waterLatest/${deviceId} → ${sizeInKB.toFixed(2)} KB`);
+
+  latestDataCache.set(deviceId, latest);
   res.send(latest);
 });
 
@@ -115,6 +126,10 @@ app.get('/history/:deviceId', async (req, res) => {
     const ref = db.ref(`waterHistory/${dateKey}/${deviceId}`);
     const snapshot = await ref.once('value');
 
+    const val = snapshot.val();
+    const sizeInKB = calculateSizeInKB(val || {});
+    console.log(`[FIREBASE READ] waterHistory/${dateKey}/${deviceId} → ${sizeInKB.toFixed(2)} KB`);
+
     snapshot.forEach(child => {
       const timestamp = Number(child.key);
       if (timestamp >= threeDaysAgo) {
@@ -128,11 +143,10 @@ app.get('/history/:deviceId', async (req, res) => {
     .forEach(d => result.push({ timestamp: d.timestamp, level: d.level }));
 
   result.sort((a, b) => a.timestamp - b.timestamp);
-  
-  // ✅ 計算回傳 payload 大小（字串化後的 JSON）
-  const sizeInKB = Buffer.byteLength(JSON.stringify(result), 'utf8') / 1024;
+
+  const sizeInKB = calculateSizeInKB(result);
   console.log(`Response size ≈ ${sizeInKB.toFixed(2)} KB`);
-  
+
   res.send(result);
 });
 
@@ -149,6 +163,7 @@ cron.schedule('0 0 * * *', async () => {
 
   for (const dateKey of folders) {
     if (dateKey <= threeDaysAgoKey) {
+      console.log(`[FIREBASE DELETE] waterHistory/${dateKey}`);
       await db.ref(`waterHistory/${dateKey}`).remove();
       deletedCount++;
     }
